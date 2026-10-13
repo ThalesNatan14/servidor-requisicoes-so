@@ -5,7 +5,6 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
-#include <atomic>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
