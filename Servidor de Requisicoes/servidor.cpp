@@ -1,4 +1,3 @@
-
 #include <iostream>
 #include <string>
 #include <vector>
@@ -6,288 +5,175 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
+#include <atomic>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
-
 #include "texto_em_palavras.hpp"
 
-#ifndef MSG_NOSIGNAL
-#define MSG_NOSIGNAL 0
-#endif
-
-struct Tarefa
+class Tarefa
 {
-    std::string caminho_arquivo;
+public:
+    int cliente_socket;        // MUDOU: no lugar de caminho_arquivo
     std::string palavra;
-};
-
-struct Resultado
-{
-    std::string caminho_arquivo;
-    int quantidade;
 };
 
 std::queue<Tarefa> fila;
 std::mutex mutex_fila;
-std::condition_variable condicao_fila;
+std::condition_variable cv_fila;   // MUDOU: novo, faz a thread dormir com a fila vazia
 
-std::mutex mutex_resultados;
-std::condition_variable condicao_resultados;
-
-std::vector<Resultado> resultados;
-int tarefas_pendentes = 0;
-
-const std::vector<std::string> livros = {
+std::vector<std::string> livros = {
     "./livros/dom_casmurro.txt",
+    "./livros/iracema.txt",
     "./livros/memorias_braz_cubas.txt",
-    "./livros/quincas_borba.txt",
     "./livros/o_cortico.txt",
-    "./livros/iracema.txt"
+    "./livros/quincas_borba.txt"
 };
 
+std::vector<std::thread> threads;
+
+// MUDOU: o trabalhador inteiro foi reescrito (void, nunca retorna)
 void trabalhador()
 {
     while (true)
     {
         Tarefa tarefa_atual;
 
+        // 1. Retirar a tarefa da fila (só essa parte fica travada)
         {
             std::unique_lock<std::mutex> trava(mutex_fila);
-
-            condicao_fila.wait(trava, [] {
-                return !fila.empty();
-            });
-
+            cv_fila.wait(trava, [] { return !fila.empty(); });  // dorme até ter tarefa
             tarefa_atual = fila.front();
             fila.pop();
-        }
+        }   // destrava aqui, antes da parte lenta
 
-        int quantidade = contarPalavra(
-            tarefa_atual.caminho_arquivo,
-            tarefa_atual.palavra
-        );
-
-        std::cout << "Tarefa concluida: "
-                  << tarefa_atual.caminho_arquivo
-                  << " -> " << quantidade << '\n';
-
+        // 2. Contar a palavra nos 5 livros (fora do lock, em paralelo)
+        std::string resposta;
+        for (const std::string& caminho : livros)
         {
-            std::lock_guard<std::mutex> trava(mutex_resultados);
+            int qtd = contarPalavra(caminho, tarefa_atual.palavra);
 
-            resultados.push_back({
-                tarefa_atual.caminho_arquivo,
-                quantidade
-            });
-
-            --tarefas_pendentes;
-
-            if (tarefas_pendentes == 0)
-                condicao_resultados.notify_one();
+            resposta += caminho;
+            resposta += ": ";
+            if (qtd == -1)
+                resposta += "erro ao abrir o arquivo";
+            else
+                resposta += std::to_string(qtd);
+            resposta += "\n";
         }
+
+        // 3. Responder e fechar
+        ssize_t enviado = send(tarefa_atual.cliente_socket, resposta.c_str(),
+                               resposta.size(), MSG_NOSIGNAL);
+        if (enviado < 0)
+        {
+            std::cout << "Erro ao enviar a resposta\n";
+        }
+        close(tarefa_atual.cliente_socket);
     }
 }
 
 int main()
 {
+    // 1. Criar socket
     int servidor_socket = socket(AF_INET, SOCK_STREAM, 0);
 
     if (servidor_socket == -1)
     {
-        perror("Erro ao criar socket");
+        std::cout << "Erro ao criar socket\n";
         return 1;
     }
 
-    int opcao = 1;
-    setsockopt(
-        servidor_socket,
-        SOL_SOCKET,
-        SO_REUSEADDR,
-        &opcao,
-        sizeof(opcao)
-    );
+    // MUDOU: permite reiniciar o servidor sem "Address already in use"
+    int opt = 1;
+    setsockopt(servidor_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    sockaddr_in endereco{};
+    std::cout << "Socket criado!\n";
+
+    // 2. Configurar endereço
+    sockaddr_in endereco{};   // MUDOU: {} zera a memória
     endereco.sin_family = AF_INET;
     endereco.sin_addr.s_addr = INADDR_ANY;
-    endereco.sin_port = htons(8080);
+    endereco.sin_port = htons(9090);
 
-    if (bind(
-        servidor_socket,
-        reinterpret_cast<sockaddr*>(&endereco),
-        sizeof(endereco)
-    ) == -1)
+    // 3. Associar socket ao endereço
+    if (bind(servidor_socket, (sockaddr*)&endereco, sizeof(endereco)) == -1)
     {
-        perror("Erro no bind");
-        close(servidor_socket);
+        std::cout << "Erro no bind\n";
         return 1;
     }
 
-    if (listen(servidor_socket, 10) == -1)
+    // 4. Esperar conexões
+    if (listen(servidor_socket, SOMAXCONN) == -1)   // MUDOU: 5 virou SOMAXCONN
     {
-        perror("Erro no listen");
-        close(servidor_socket);
+        std::cout << "Erro no listen\n";
         return 1;
     }
 
-    std::cout << "Servidor esperando cliente na porta 8080...\n";
+    std::cout << "Servidor esperando cliente...\n";
 
-    std::vector<std::thread> trabalhadores;
-
-    for (int i = 0; i < 3; ++i)
-        trabalhadores.emplace_back(trabalhador);
+    // Pool de threads (criado uma vez, antes do loop)
+    for (int i = 0; i < 3; i++)
+    {
+        threads.push_back(std::thread(trabalhador));
+    }
 
     while (true)
     {
+        // 5. Aceitar cliente
         int cliente_socket = accept(servidor_socket, nullptr, nullptr);
 
         if (cliente_socket == -1)
         {
-            perror("Erro no accept");
+            std::cout << "Erro no accept\n";
             continue;
         }
 
-        std::cout << "\nCliente conectado!\n";
+        std::cout << "Cliente conectado!\n";
 
+        // 6. Receber a palavra
         char buffer[1024];
-        std::string mensagem;
-        bool mensagem_completa = false;
-        bool erro_recebimento = false;
+        ssize_t n = recv(cliente_socket, buffer, sizeof(buffer), 0);
 
-        // Recebe a palavra até encontrar '\n'.
-        // Não espera o cliente fechar a conexão.
-        while (!mensagem_completa)
+        if (n < 0)
         {
-            ssize_t n = recv(
-                cliente_socket,
-                buffer,
-                sizeof(buffer),
-                0
-            );
-
-            if (n > 0)
-            {
-                mensagem.append(buffer, static_cast<size_t>(n));
-
-                size_t fim = mensagem.find('\n');
-
-                if (fim != std::string::npos)
-                {
-                    mensagem.erase(fim);
-                    mensagem_completa = true;
-                }
-            }
-            else if (n == 0)
-            {
-                break;
-            }
-            else
-            {
-                perror("Erro ao receber mensagem");
-                erro_recebimento = true;
-                break;
-            }
+            std::cout << "Erro no recebimento da palavra\n";
+            close(cliente_socket);
+            continue;
         }
-
-        // Remove '\r', caso o cliente envie "\r\n".
-        if (!mensagem.empty() && mensagem.back() == '\r')
-            mensagem.pop_back();
-
-        if (erro_recebimento || !mensagem_completa || mensagem.empty())
+        if (n == 0)
         {
-            std::cerr << "Mensagem vazia ou incompleta.\n";
+            std::cout << "O cliente desligou a conexão\n";
             close(cliente_socket);
             continue;
         }
 
-        std::cout << "Palavra recebida: " << mensagem << '\n';
+        // MUDOU: sem o "if (n > 0)", pois aqui n já é sempre > 0
+        std::string palavra(buffer, n);
 
-        // Prepara as cinco tarefas.
+        while (!palavra.empty() && (palavra.back() == '\n' || palavra.back() == '\r'))
         {
-            std::lock_guard<std::mutex> trava(mutex_resultados);
-
-            resultados.clear();
-            tarefas_pendentes = static_cast<int>(livros.size());
+            palavra.pop_back();
         }
 
+        if (palavra.empty())
+        {
+            std::cout << "Palavra vazia, ignorando\n";
+            close(cliente_socket);
+            continue;
+        }
+
+        std::cout << "Palavra recebida: [" << palavra << "]\n";   // MUDOU: aspas corrigidas
+
+        // MUDOU: UM push só (não mais 5), protegido pelo mutex
         {
             std::lock_guard<std::mutex> trava(mutex_fila);
-
-            for (const std::string& caminho : livros)
-            {
-                fila.push({caminho, mensagem});
-            }
+            fila.push({cliente_socket, palavra});
         }
+        cv_fila.notify_one();   // MUDOU: acorda uma thread dormindo
 
-        condicao_fila.notify_all();
-
-        // Aguarda os trabalhadores terminarem as buscas.
-        std::string resposta;
-        {
-            std::unique_lock<std::mutex> trava(mutex_resultados);
-
-            condicao_resultados.wait(trava, [] {
-                return tarefas_pendentes == 0;
-            });
-
-            int total = 0;
-
-            resposta = "Resultados para a palavra: " + mensagem + "\n\n";
-
-            for (const Resultado& r : resultados)
-            {
-                resposta += r.caminho_arquivo + ": ";
-
-                if (r.quantidade == -1)
-                {
-                    resposta += "erro ao abrir arquivo\n";
-                }
-                else
-                {
-                    resposta += std::to_string(r.quantidade) + "\n";
-                    total += r.quantidade;
-                }
-            }
-
-            resposta += "\nTotal encontrado: "
-                      + std::to_string(total) + "\n";
-        }
-
-        // Envia toda a resposta, mesmo se send enviar apenas parte.
-        size_t enviados = 0;
-
-        while (enviados < resposta.size())
-        {
-            ssize_t n = send(
-                cliente_socket,
-                resposta.data() + enviados,
-                resposta.size() - enviados,
-                MSG_NOSIGNAL
-            );
-
-            if (n <= 0)
-            {
-                perror("Erro ao enviar resposta");
-                break;
-            }
-
-            enviados += static_cast<size_t>(n);
-        }
-
-        std::cout << "Bytes enviados: " << enviados
-                  << " de " << resposta.size() << '\n';
-
-        // Indica que não haverá mais dados enviados.
-        shutdown(cliente_socket, SHUT_WR);
-        close(cliente_socket);
-
-        std::cout << "Resposta enviada. Conexao encerrada.\n";
+        // A main NÃO dá close: quem fecha é o trabalhador
     }
-
-    close(servidor_socket);
-
-    for (auto& t : trabalhadores)
-        t.join();
 
     return 0;
 }
