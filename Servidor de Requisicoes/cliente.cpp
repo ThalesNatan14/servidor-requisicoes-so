@@ -1,11 +1,6 @@
-#ifdef _WIN32
-#error "Compile dentro do WSL/Linux (no Windows puro os sockets sao diferentes: Winsock)."
-#endif
-
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
-
 #include <chrono>
 #include <iomanip>
 #include <iostream>
@@ -17,12 +12,8 @@
 #include <cerrno>
 #include <cstdio>
 
-#ifndef MSG_NOSIGNAL
-#define MSG_NOSIGNAL 0
-#endif
-
 const char* SERVIDOR_IP = "127.0.0.1";
-const int SERVIDOR_PORTA = 8080;
+const int SERVIDOR_PORTA = 9090;
 
 bool consultar(const std::string& palavra, std::string& resultado)
 {
