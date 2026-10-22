@@ -13,13 +13,13 @@
 class Tarefa
 {
 public:
-    int cliente_socket;        // MUDOU: no lugar de caminho_arquivo
+    int cliente_socket;        
     std::string palavra;
 };
 
 std::queue<Tarefa> fila;
 std::mutex mutex_fila;
-std::condition_variable cv_fila;   // MUDOU: novo, faz a thread dormir com a fila vazia
+std::condition_variable cv_fila;   
 
 std::vector<std::string> livros = {
     "./livros/dom_casmurro.txt",
@@ -31,14 +31,14 @@ std::vector<std::string> livros = {
 
 std::vector<std::thread> threads;
 
-// MUDOU: o trabalhador inteiro foi reescrito (void, nunca retorna)
+
 void trabalhador()
 {
     while (true)
     {
         Tarefa tarefa_atual;
 
-        // 1. Retirar a tarefa da fila (só essa parte fica travada)
+        //Retirar a tarefa da fila (só essa parte fica travada)
         {
             std::unique_lock<std::mutex> trava(mutex_fila);
             cv_fila.wait(trava, [] { return !fila.empty(); });  // dorme até ter tarefa
@@ -46,7 +46,7 @@ void trabalhador()
             fila.pop();
         }   // destrava aqui, antes da parte lenta
 
-        // 2. Contar a palavra nos 5 livros (fora do lock, em paralelo)
+        //Contar a palavra nos 5 livros 
         std::string resposta;
         for (const std::string& caminho : livros)
         {
@@ -61,7 +61,7 @@ void trabalhador()
             resposta += "\n";
         }
 
-        // 3. Responder e fechar
+        //Responder e fechar
         ssize_t enviado = send(tarefa_atual.cliente_socket, resposta.c_str(),
                                resposta.size(), MSG_NOSIGNAL);
         if (enviado < 0)
@@ -83,14 +83,14 @@ int main()
         return 1;
     }
 
-    // MUDOU: permite reiniciar o servidor sem "Address already in use"
+    //permite reiniciar o servidor sem "Address already in use"
     int opt = 1;
     setsockopt(servidor_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     std::cout << "Socket criado!\n";
 
     // 2. Configurar endereço
-    sockaddr_in endereco{};   // MUDOU: {} zera a memória
+    sockaddr_in endereco{};   
     endereco.sin_family = AF_INET;
     endereco.sin_addr.s_addr = INADDR_ANY;
     endereco.sin_port = htons(9090);
@@ -103,7 +103,7 @@ int main()
     }
 
     // 4. Esperar conexões
-    if (listen(servidor_socket, SOMAXCONN) == -1)   // MUDOU: 5 virou SOMAXCONN
+    if (listen(servidor_socket, SOMAXCONN) == -1)   
     {
         std::cout << "Erro no listen\n";
         return 1;
@@ -111,7 +111,7 @@ int main()
 
     std::cout << "Servidor esperando cliente...\n";
 
-    // Pool de threads (criado uma vez, antes do loop)
+    // Criação de threads
     for (int i = 0; i < 3; i++)
     {
         threads.push_back(std::thread(trabalhador));
@@ -147,7 +147,7 @@ int main()
             continue;
         }
 
-        // MUDOU: sem o "if (n > 0)", pois aqui n já é sempre > 0
+        
         std::string palavra(buffer, n);
 
         while (!palavra.empty() && (palavra.back() == '\n' || palavra.back() == '\r'))
@@ -162,16 +162,15 @@ int main()
             continue;
         }
 
-        std::cout << "Palavra recebida: [" << palavra << "]\n";   // MUDOU: aspas corrigidas
+        std::cout << "Palavra recebida: [" << palavra << "]\n";   
 
-        // MUDOU: UM push só (não mais 5), protegido pelo mutex
+    
         {
             std::lock_guard<std::mutex> trava(mutex_fila);
             fila.push({cliente_socket, palavra});
         }
-        cv_fila.notify_one();   // MUDOU: acorda uma thread dormindo
+        cv_fila.notify_one();   //acorda uma thread dormindo
 
-        // A main NÃO dá close: quem fecha é o trabalhador
     }
 
     return 0;
